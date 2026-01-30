@@ -4,7 +4,7 @@
    - For very large assets, an "assets-only zip" option exists.
 */
 const DB_NAME = "llm_memory_album_v2";
-const DB_VER = 3;
+const DB_VER = 4;
 
 const STORES = {
   conv: "conversations",
@@ -14,7 +14,10 @@ const STORES = {
   label: "model_labels",
   history: "history_events",
   meta: "meta",
-  iconcfg: "icon_config"
+  iconcfg: "icon_config",
+  // v4: (このワーカーでは未使用だがスキーマ整合性のため)
+  importState: "import_state",
+  convIndex: "conv_index"
 };
 
 let cancelled = false;

@@ -1092,27 +1092,62 @@ async function createMomentFromSelection() {
 }
 
 // Import Worker wiring
+let pendingImportFile = null; // チェックポイント確認用にファイルを保持
+
 if (importWorker) importWorker.onmessage = async (e) => {
   const m = e.data;
   if (m.type === "status") setStatus(m.msg);
+
   if (m.type === "progress") {
-    const pct = m.total ? (m.done / m.total) * 100 : 0;
+    // 新形式: { bytes, totalBytes, processed, saved, skipped, phase }
+    const pct = m.totalBytes ? (m.bytes / m.totalBytes) * 100 : 0;
     setBar(pct);
-    setStatus(`${m.phase}… ${m.done}/${m.total}`);
+    const bytesStr = `${bytes(m.bytes)}/${bytes(m.totalBytes)}`;
+    const statsStr = `処理:${m.processed} 保存:${m.saved} スキップ:${m.skipped}`;
+    setStatus(`${m.phase}… ${bytesStr} (${statsStr})`);
   }
+
+  // チェックポイントが見つかった - 再開するか確認
+  if (m.type === "checkpoint_found") {
+    const cp = m.checkpoint;
+    const resumeInfo = `前回の中断地点: ${cp.processedCount}件処理済み（保存:${cp.savedCount} スキップ:${cp.skippedCount}）`;
+    const choice = confirm(`${resumeInfo}\n\n「OK」= 続きから再開\n「キャンセル」= 最初からやり直し`);
+
+    if (pendingImportFile) {
+      if (choice) {
+        importWorker.postMessage({ type: "resume", file: pendingImportFile });
+      } else {
+        importWorker.postMessage({ type: "restart", file: pendingImportFile });
+      }
+    }
+  }
+
+  // キャンセル完了
+  if (m.type === "cancelled") {
+    importing = false;
+    lockUI(false);
+    pendingImportFile = null;
+    setStatus(`キャンセル完了: ${m.processed}件処理済み（次回続きから再開可能）`);
+    state.searchDirty = true;
+    await refreshFromDB();
+  }
+
   if (m.type === "done") {
     importing = false;
     lockUI(false);
-    setStatus(`取り込み完了: 会話${m.sessions} / auto-history${m.history}`);
+    pendingImportFile = null;
+    const skipInfo = m.skipped > 0 ? ` / スキップ${m.skipped}` : "";
+    setStatus(`取り込み完了: 会話${m.sessions}${skipInfo} / auto-history${m.history}`);
     state.searchDirty = true;
     wireIconModalOnce();
-  await refreshFromDB();
-    // auto rebuild search after import
+    await refreshFromDB();
     rebuildSearch();
   }
+
   if (m.type === "error") {
     importing = false;
     lockUI(false);
+    pendingImportFile = null;
     setStatus("取り込み失敗: " + m.msg);
   }
 };
@@ -1520,17 +1555,24 @@ $importBtn.onclick = async () => {
   setBar(1);
   setStatus("取り込み開始…");
   if (!importWorker) { setStatus("取り込みワーカーが起動できません。GitHub Pages か http で開いてね"); lockUI(false); importing=false; return; }
+  pendingImportFile = f; // チェックポイント確認用に保持
   importWorker.postMessage({ type: "import", file: f });
 };
 
 $cancelBtn.onclick = () => {
-  if (importWorker) importWorker.postMessage({ type: "cancel" });
+  if (importWorker) {
+    importWorker.postMessage({ type: "cancel" });
+    setStatus("キャンセル中…（チェックポイント保存中）");
+    // importing と lockUI は cancelled メッセージ受信時に解除
+  }
   if (searchWorker) searchWorker.postMessage({ type: "cancel" });
   if (exportWorker) exportWorker.postMessage({ type: "cancel" });
-  importing = false;
-  exporting = false;
-  lockUI(false);
-  setStatus("キャンセル送信");
+  if (!importing) {
+    // インポート以外の場合は即座に解除
+    exporting = false;
+    lockUI(false);
+    setStatus("キャンセル送信");
+  }
 };
 
 $wipeBtn.onclick = async () => {
