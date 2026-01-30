@@ -331,21 +331,21 @@ async function* streamParseTopLevelArrayOfObjects(byteStream) {
   buf += dec.decode();
 }
 
-// === ChatGPT会話の正規化 ===
+// === ChatGPT会話の正規化（改良版：順方向にメッセージを収集） ===
 function normalizeChatGPTConversation(c) {
   const mapping = c.mapping || {};
-  let nodeId = c.current_node;
-  const msgs = [];
 
-  while (nodeId) {
+  // 全ノードを収集し、create_timeでソート
+  const allNodes = [];
+  for (const nodeId in mapping) {
     const node = mapping[nodeId];
-    if (!node) break;
-    const msg = node.message;
+    const msg = node?.message;
     if (msg?.author?.role && msg?.content?.parts) {
       const parts = msg.content.parts;
       const text = parts.filter(p => typeof p === "string").join("\n");
       if (text && text.trim()) {
-        msgs.push({
+        allNodes.push({
+          id: nodeId,
           role: msg.author.role,
           text,
           ts: msg.create_time || null,
@@ -353,9 +353,23 @@ function normalizeChatGPTConversation(c) {
         });
       }
     }
-    nodeId = node.parent;
   }
-  msgs.reverse();
+
+  // create_time（ts）でソート（nullは末尾に）
+  allNodes.sort((a, b) => {
+    if (a.ts === null && b.ts === null) return 0;
+    if (a.ts === null) return 1;
+    if (b.ts === null) return -1;
+    return a.ts - b.ts;
+  });
+
+  // メッセージ配列を作成
+  const msgs = allNodes.map(n => ({
+    role: n.role,
+    text: n.text,
+    ts: n.ts,
+    model: n.model
+  }));
 
   if (!c.id || !msgs.length) return null;
 
