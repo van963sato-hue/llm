@@ -131,11 +131,18 @@
   </div>
 
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0;">
-    <input id="q" class="grow" placeholder="検索（タイトル/本文/Moment/タグ/お別れ/記憶メモ）" />
-    <select id="providerFilter" title="providerで絞る" style="max-width:220px">
+    <input id="q" class="grow" placeholder="検索" />
+    <select id="searchMode" title="検索モード" style="max-width:140px">
+      <option value="all">全文検索</option>
+      <option value="title">タイトルのみ</option>
+    </select>
+    <select id="periodFilter" title="期間で絞る" style="max-width:160px">
+      <option value="">期間: all</option>
+    </select>
+    <select id="providerFilter" title="providerで絞る" style="max-width:180px">
       <option value="">provider: all</option>
     </select>
-    <select id="modelFilter" title="modelで絞る" style="max-width:240px">
+    <select id="modelFilter" title="modelで絞る" style="max-width:180px">
       <option value="">model: all</option>
     </select>
     <button id="clearFiltersBtn" title="フィルタ解除">解除</button>

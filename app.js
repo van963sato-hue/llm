@@ -22,6 +22,8 @@ const $q = $("q");
 
 const $providerFilter = $("providerFilter");
 const $modelFilter = $("modelFilter");
+const $periodFilter = $("periodFilter");
+const $searchMode = $("searchMode");
 const $clearFiltersBtn = $("clearFiltersBtn");
 
 const $file = $("file");
@@ -60,7 +62,8 @@ let state = {
   searchIds: null, // {convIds, momentIds, promptIds, historyIds}
   searchDirty: true,
   limits: { conv: 120, moment: 50, history: 80 },
-  filters: { provider: "", model: "" }
+  filters: { provider: "", model: "", period: "" },
+  searchMode: "all" // "all" = 全文検索, "title" = タイトルのみ
 };
 
 
@@ -386,25 +389,42 @@ function populateFilters() {
   // preserve selection
   const prevP = state.filters.provider || "";
   const prevM = state.filters.model || "";
+  const prevPeriod = state.filters.period || "";
 
   const providers = uniq(state.convs.map(c => c.provider)).sort();
   const models = uniq(state.convs.flatMap(c => c.models || [])).sort();
 
+  // 期間フィルタ用: 年月を収集（createdAtベース）
+  const periods = new Set();
+  for (const c of state.convs) {
+    if (c.createdAt) {
+      const d = new Date(c.createdAt);
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      periods.add(ym);
+    }
+  }
+  const periodList = Array.from(periods).sort().reverse(); // 新しい順
+
   // provider select
   $providerFilter.innerHTML = `<option value="">provider: all</option>` + providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
   $modelFilter.innerHTML = `<option value="">model: all</option>` + models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+  $periodFilter.innerHTML = `<option value="">期間: all</option>` + periodList.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
 
   // restore if available
   if (providers.includes(prevP)) $providerFilter.value = prevP; else $providerFilter.value = "";
   if (models.includes(prevM)) $modelFilter.value = prevM; else $modelFilter.value = "";
+  if (periodList.includes(prevPeriod)) $periodFilter.value = prevPeriod; else $periodFilter.value = "";
 
   state.filters.provider = $providerFilter.value || "";
   state.filters.model = $modelFilter.value || "";
+  state.filters.period = $periodFilter.value || "";
 }
 
 function applyFilters() {
   state.filters.provider = $providerFilter.value || "";
   state.filters.model = $modelFilter.value || "";
+  state.filters.period = $periodFilter.value || "";
+  state.searchMode = $searchMode.value || "all";
   renderLeft();
   // If currently showing a conversation that doesn't match filters, keep right as-is (user may want to read it),
   // but list will be filtered.
@@ -413,8 +433,14 @@ function applyFilters() {
 function clearFilters() {
   state.filters.provider = "";
   state.filters.model = "";
+  state.filters.period = "";
+  state.searchMode = "all";
   $providerFilter.value = "";
   $modelFilter.value = "";
+  $periodFilter.value = "";
+  $searchMode.value = "all";
+  $q.value = "";
+  state.searchIds = null;
   renderLeft();
 }
 
@@ -456,6 +482,12 @@ function applySearchIds(ids) {
 function convPass(c) {
   if (state.filters.provider && (c.provider || "") !== state.filters.provider) return false;
   if (state.filters.model && !(c.models || []).includes(state.filters.model)) return false;
+  // 期間フィルタ（YYYY-MM形式）
+  if (state.filters.period && c.createdAt) {
+    const d = new Date(c.createdAt);
+    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    if (ym !== state.filters.period) return false;
+  }
   if (!state.searchIds) return true;
   return state.searchIds.convIds?.includes(c.id);
 }
@@ -1195,6 +1227,25 @@ function doSearch(q) {
     renderLeft();
     return;
   }
+
+  // タイトル検索モード: Workerを使わずローカルでフィルタリング
+  if (state.searchMode === "title") {
+    const lowerQ = query.toLowerCase();
+    const convIds = state.convs
+      .filter(c => (c.title || "").toLowerCase().includes(lowerQ))
+      .map(c => c.id);
+    const momentIds = state.moments
+      .filter(m => (m.title || "").toLowerCase().includes(lowerQ))
+      .map(m => m.id);
+    const historyIds = state.history
+      .filter(h => (h.title || "").toLowerCase().includes(lowerQ))
+      .map(h => h.id);
+    state.searchIds = { convIds, momentIds, promptIds: [], historyIds };
+    renderLeft();
+    return;
+  }
+
+  // 全文検索モード: Workerで3-gram検索
   if (state.searchDirty) {
     setStatus("検索インデックスが古いかも。Rebuild推奨。");
   }
@@ -1628,6 +1679,13 @@ if ($iconCfgBtn) $iconCfgBtn.onclick = openIconConfig;
 $q.oninput = () => doSearch($q.value);
 $providerFilter.onchange = applyFilters;
 $modelFilter.onchange = applyFilters;
+$periodFilter.onchange = applyFilters;
+$searchMode.onchange = () => {
+  state.searchMode = $searchMode.value || "all";
+  // 検索クエリがあれば再検索
+  const q = $q.value.trim();
+  if (q) doSearch(q);
+};
 $clearFiltersBtn.onclick = () => { clearFilters(); };
 
 
