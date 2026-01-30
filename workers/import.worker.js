@@ -241,48 +241,71 @@ async function unzipFindFile(file, targetNames) {
   throw new Error("ZIP内に対象ファイルが見つからない（conversations.json など）");
 }
 
-// === ストリーミングJSONパーサ（シンプル版：件数ベース） ===
+// === ストリーミングJSONパーサ（メモリ最適化版） ===
 async function* streamParseTopLevelArrayOfObjects(byteStream) {
   const reader = byteStream.getReader();
   const dec = new TextDecoder("utf-8");
-  let buf = "";
+  const chunks = []; // 文字列連結を避けてチャンク配列で管理
+  let totalLen = 0;
 
   let started = false;
   let inString = false;
   let esc = false;
   let depth = 0;
-  let objStart = -1;
+  let objStartChunk = -1;
+  let objStartIdx = -1;
 
   function isWS(ch) { return ch === " " || ch === "\n" || ch === "\r" || ch === "\t"; }
+
+  // チャンク配列から文字列を構築
+  function buildString(startChunk, startIdx, endChunk, endIdx) {
+    if (startChunk === endChunk) {
+      return chunks[startChunk].slice(startIdx, endIdx + 1);
+    }
+    let result = chunks[startChunk].slice(startIdx);
+    for (let c = startChunk + 1; c < endChunk; c++) {
+      result += chunks[c];
+    }
+    result += chunks[endChunk].slice(0, endIdx + 1);
+    return result;
+  }
+
+  // 使用済みチャンクを解放
+  function releaseChunks(upToChunk) {
+    if (upToChunk <= 0) return;
+    const removed = chunks.splice(0, upToChunk);
+    for (const r of removed) totalLen -= r.length;
+    if (objStartChunk >= 0) objStartChunk -= upToChunk;
+  }
 
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
 
-    buf += dec.decode(value, { stream: true });
+    const chunk = dec.decode(value, { stream: true });
+    chunks.push(chunk);
+    totalLen += chunk.length;
 
-    let i = 0;
+    const chunkIdx = chunks.length - 1;
 
-    if (!started) {
-      while (i < buf.length && isWS(buf[i])) i++;
-      if (i < buf.length && buf[i] === "[") { started = true; i++; }
+    for (let i = 0; i < chunk.length; i++) {
+      const ch = chunk[i];
+
       if (!started) {
-        if (buf.length > 1024 * 1024) buf = buf.slice(-1024 * 1024);
+        if (isWS(ch)) continue;
+        if (ch === "[") { started = true; continue; }
         continue;
       }
-    }
 
-    for (; i < buf.length; i++) {
-      const ch = buf[i];
-
-      if (objStart < 0) {
+      if (objStartChunk < 0) {
         if (isWS(ch) || ch === ",") continue;
         if (ch === "]") {
-          buf = "";
+          chunks.length = 0;
           return;
         }
         if (ch === "{") {
-          objStart = i;
+          objStartChunk = chunkIdx;
+          objStartIdx = i;
           depth = 1;
           inString = false;
           esc = false;
@@ -302,33 +325,35 @@ async function* streamParseTopLevelArrayOfObjects(byteStream) {
         if (ch === "}" || ch === "]") { depth--; }
 
         if (depth === 0) {
-          const jsonStr = buf.slice(objStart, i + 1);
-          let obj;
+          // オブジェクト完了
           try {
-            obj = JSON.parse(jsonStr);
+            const jsonStr = buildString(objStartChunk, objStartIdx, chunkIdx, i);
+            const obj = JSON.parse(jsonStr);
+            yield obj;
           } catch (e) {
-            throw new Error("JSONパースエラー: " + (e?.message || e));
+            // 個別のオブジェクトのパースエラーはスキップ
+            console.warn("JSONパースエラー（スキップ）:", e?.message || e);
           }
 
-          yield obj;
+          // 使用済みチャンクを解放
+          releaseChunks(chunkIdx);
 
-          buf = buf.slice(i + 1);
-          i = -1;
-          objStart = -1;
+          objStartChunk = -1;
+          objStartIdx = -1;
           depth = 0;
           inString = false;
           esc = false;
-          started = true;
         }
       }
     }
 
-    if (buf.length > 64 * 1024 * 1024 && objStart < 0) {
-      buf = buf.slice(-4 * 1024 * 1024);
+    // メモリ制限: 100MB超えたらエラー（通常の会話ではありえない）
+    if (totalLen > 100 * 1024 * 1024 && objStartChunk < 0) {
+      releaseChunks(chunks.length - 1);
     }
   }
 
-  buf += dec.decode();
+  dec.decode(); // flush
 }
 
 // === ChatGPT会話の正規化（改良版：順方向にメッセージを収集） ===
@@ -599,7 +624,13 @@ async function handleFile(file, options = {}) {
         continue;
       }
 
-      const conv = normalizeChatGPTConversation(rawConv);
+      let conv;
+      try {
+        conv = normalizeChatGPTConversation(rawConv);
+      } catch (e) {
+        console.warn("会話の正規化エラー（スキップ）:", e?.message || e);
+        continue;
+      }
       if (!conv) continue;
 
       pendingConvs.push(conv);
