@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>LLM Memory Album</title>
+  <meta name="theme-color" content="#ffffff">
+  <meta name="color-scheme" content="light dark">
+  <link rel="manifest" href="./pwa/manifest.webmanifest">
+  <link rel="icon" href="./pwa/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./pwa/icons/icon-192.png">
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #111111;
+      --muted: rgba(0,0,0,.65);
+      --border: rgba(0,0,0,.15);
+      --hover: rgba(0,0,0,.05);
+      --sel: rgba(255, 217, 102, .35);
+      --pill: rgba(0,0,0,.06);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1115;
+        --fg: #f3f4f6;
+        --muted: rgba(255,255,255,.65);
+        --border: rgba(255,255,255,.18);
+        --hover: rgba(255,255,255,.06);
+        --sel: rgba(255, 217, 102, .18);
+        --pill: rgba(255,255,255,.08);
+      }
+    }
+    body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;margin:12px;background:var(--bg);color:var(--fg)}
+    .row{display:flex;gap:12px}
+    .col{flex:1;min-width:0}
+    .panel{border:1px solid var(--border);border-radius:14px;padding:10px;height:66vh;overflow:auto}
+    .muted{opacity:.8;color:var(--muted)}
+    .item{padding:10px;border-bottom:1px solid var(--border);cursor:pointer}
+    .item:hover{background:var(--hover)}
+    .msg{padding:10px;border-bottom:1px solid var(--border);white-space:pre-wrap;word-break:break-word}
+    .msg.sel{background:var(--sel)}
+    button{padding:8px 10px;border-radius:12px;border:1px solid var(--border);background:transparent;color:var(--fg);cursor:pointer}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    input,textarea,select{width:100%;padding:10px;border:1px solid var(--border);border-radius:12px;background:transparent;color:var(--fg)}
+    .pill{display:inline-block;padding:2px 10px;border:1px solid var(--border);border-radius:999px;margin-right:6px;font-size:12px;background:var(--pill)}
+    .topbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .topbar > * { flex: 0 0 auto; }
+    .grow { flex: 1 1 auto; min-width: 220px; }
+    .hr{height:1px;background:var(--border);margin:10px 0}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    @media (max-width: 900px){
+      .row{flex-direction:column}
+      .panel{height:52vh}
+      .grid2{grid-template-columns:1fr}
+    }
+    .progress{height:10px;border:1px solid var(--border);border-radius:999px;overflow:hidden}
+    .bar{height:100%;width:0%;background:rgba(80,140,255,.55)}
+    a { color: inherit; }
+  
+
+    .chatlog{max-height:calc(100vh - 210px);overflow:auto;padding-right:4px}
+    .msg{padding:10px 12px;border-radius:14px;border:1px solid var(--border);margin:10px 0;cursor:pointer}
+    .msg.user{background:#fafafa}
+    .msg.assistant{background:#ffffff}
+    .msg.system{background:#fff7e6}
+    .msgmeta{font-size:12px;color:var(--muted);margin-bottom:6px}
+    .msgmeta b{color:var(--fg);font-weight:700}
+    .msgbody{white-space:pre-wrap;word-break:break-word;line-height:1.5}
+    .msg.sel{background:rgba(255, 230, 110, 0.25)}
+
+.avatarBtn{border:1px solid var(--border);background:transparent;border-radius:999px;padding:0;width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.avatar{width:30px;height:30px;border-radius:999px;object-fit:cover;display:block}
+.avatar.ph{width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;background:var(--hover);font-size:12px;font-weight:700}
+.msgmeta{display:flex;align-items:center;gap:10px}
+.metaMain{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.modalBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;padding:16px;z-index:999}
+.modalBackdrop.show{display:flex}
+.modalCard{width:min(720px, 100%);max-height:88vh;overflow:auto;border:1px solid var(--border);border-radius:16px;padding:14px;background:var(--bg);box-shadow:0 10px 40px rgba(0,0,0,.18)}
+.grid2mini{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.thumb{width:70px;height:70px;border-radius:14px;border:1px solid var(--border);object-fit:cover;background:var(--hover)}
+.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;border:1px solid var(--border);padding:2px 6px;border-radius:8px}
+.small{font-size:12px}
+
+
+.cropHint{color:var(--muted);font-size:12px}
+
+
+      #iconModal{z-index:1100}
+      #cropModal{z-index:2000}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <b>LLM Memory Album</b>
+    <span id="status" class="muted"></span>
+    <span class="grow"></span>
+    <button id="timelineBtn">Timeline</button>
+    <button id="iconCfgBtn" title="ユーザー/相棒のアイコン設定">Icon Config</button>
+    <button id="rebuildBtn" title="検索インデックスを作り直す">検索Rebuild</button>
+    <button id="aboutBtn">About</button>
+  </div>
+
+  <p class="muted">
+    ログはこのサイトにアップされません。取り込み・検索・エクスポートは端末内（IndexedDB）で完結します。
+    GitHub Pagesで配布する場合も、公開されるのはアプリ本体だけです。
+  </p>
+
+  <div class="grid2" style="margin:10px 0;">
+    <div>
+      <label class="muted">取り込み（ChatGPT Export ZIP / conversations.json / 汎用JSON）</label>
+      <input id="file" type="file" accept=".zip,.json,application/json" />
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">
+        <button id="importBtn">取り込み開始</button>
+        <button id="cancelBtn" disabled>キャンセル</button>
+        <button id="wipeBtn" title="端末内データを消去">全消去</button>
+      </div>
+      <div style="margin-top:10px">
+        <div class="progress" aria-label="progress"><div id="bar" class="bar"></div></div>
+      </div>
+    </div>
+
+    <div>
+      <label class="muted">エクスポート（軽量→確実／完全ZIP→大容量）</label>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">
+        <button id="exportLiteBtn">軽量エクスポート（json）</button>
+        <button id="exportFullBtn">完全エクスポート（zip）</button>
+        <button id="exportAssetsBtn">画像だけ（zip）</button>
+      </div>
+      <div style="margin-top:10px" class="muted" id="usage"></div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin:10px 0;">
+    <input id="q" class="grow" placeholder="検索（タイトル/本文/Moment/タグ/お別れ/記憶メモ）" />
+    <select id="providerFilter" title="providerで絞る" style="max-width:220px">
+      <option value="">provider: all</option>
+    </select>
+    <select id="modelFilter" title="modelで絞る" style="max-width:240px">
+      <option value="">model: all</option>
+    </select>
+    <button id="clearFiltersBtn" title="フィルタ解除">解除</button>
+    <button id="newMomentBtn" disabled title="右の会話でメッセージを選んでから">選択からMoment</button>
+  </div>
+
+  <div class="row">
+    <div class="col">
+      <div class="panel" id="left"></div>
+    </div>
+    <div class="col">
+      <div class="panel" id="right"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js");
+  </script>
+<div id="cropModal" class="modalBackdrop">
+  <div class="modalCard">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <b id="cropTitle">画像トリミング</b>
+      <span class="muted small">ドラッグで位置調整、スライダーで拡大</span>
+      <span class="grow"></span>
+      <button id="cropCancel">キャンセル</button>
+      <button id="cropSave">切り抜いて保存</button>
+    </div>
+    <div class="hr"></div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">
+      <canvas id="cropCanvas" width="420" height="420" style="width:min(420px,100%);border:1px solid var(--border);border-radius:16px;touch-action:none"></canvas>
+      <div style="min-width:220px;flex:1">
+        <div class="muted small">拡大</div>
+        <input id="cropZoom" type="range" min="1" max="3" step="0.01" value="1" style="width:100%"/>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button id="cropReset">リセット</button>
+          <button id="cropFit">ぴったり</button>
+        </div>
+        <div class="muted small" style="margin-top:10px">
+          ※指でドラッグできます。スマホはスライダーで拡大してから合わせると楽。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="iconModal" class="modalBackdrop">
+  <div class="modalCard">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <b>臨時アイコン（この1件だけ）</b>
+      <span class="muted small">アイコンをタップしたメッセージにだけ反映</span>
+      <span class="grow"></span>
+      <button id="iconModalClose">閉じる</button>
+    </div>
+    <div class="hr"></div>
+
+    <div class="grid2mini">
+      <div>
+        <label class="small muted">表示名</label>
+        <input id="tmpIconName" placeholder="例: カミル / スクーダ / りこるさん など" />
+        <div style="margin-top:8px">
+          <input id="tmpIconFile" type="file" accept="image/*" />
+        </div>
+        <div class="muted small" style="margin-top:6px">画像はドラッグで位置調整して保存</div>
+        <div style="margin-top:10px">
+          <canvas id="tmpCropPrev" style="width:100%;max-width:420px;border:1px solid var(--border);border-radius:14px"></canvas>
+        </div>
+      </div>
+      <div>
+        <label class="small muted">メモ</label>
+        <div class="muted small">複数人キャラ（同じモデルでも別人格）をこの1件だけ差し替えたい時に使う。</div>
+        <div style="margin-top:10px" id="tmpIconCurrent" class="muted small"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+      <button id="tmpIconSave">保存</button>
+      <button id="tmpIconClear">解除</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
