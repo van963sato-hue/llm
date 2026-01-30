@@ -1,6 +1,6 @@
-/* Import Worker v2: チェックポイント機能・重複スキップ対応
+/* Import Worker v3: チェックポイント機能・重複スキップ対応（件数ベース）
    - File input から conversations.json をストリーミングパース
-   - 途中で止まっても続きから再開可能（checkpoint）
+   - 途中で止まっても続きから再開可能（checkpoint: 処理済み件数で管理）
    - 既存の会話はid+update_timeで重複判定してスキップ
    - バッチ書き込み（25件）で高速化
 */
@@ -25,11 +25,10 @@ let cancelled = false;
 // === メッセージ送信ヘルパー ===
 function postStatus(msg) { postMessage({ type: "status", msg }); }
 function postProg(data) {
-  // data: { bytes, totalBytes, processed, saved, skipped, phase }
+  // data: { processed, saved, skipped, phase }
   postMessage({ type: "progress", ...data });
 }
 function postCheckpointFound(checkpoint, fileSignature) {
-  // 再開可能なチェックポイントが見つかった
   postMessage({ type: "checkpoint_found", checkpoint, fileSignature });
 }
 
@@ -141,17 +140,14 @@ function uid(prefix="id") {
 
 // === ファイル署名生成 ===
 async function generateFileSignature(file) {
-  // 基本署名: name:size:lastModified
   const base = `${file.name}:${file.size}:${file.lastModified}`;
 
-  // 追加: 先頭8KBと末尾8KBのハッシュで強化
   try {
     const headSize = Math.min(8192, file.size);
     const tailSize = Math.min(8192, file.size);
     const headSlice = await file.slice(0, headSize).arrayBuffer();
     const tailSlice = await file.slice(Math.max(0, file.size - tailSize), file.size).arrayBuffer();
 
-    // 簡易ハッシュ（SubtleCryptoが使えない環境用のフォールバック付き）
     let hash = "";
     if (crypto.subtle) {
       const combined = new Uint8Array(headSlice.byteLength + tailSlice.byteLength);
@@ -160,7 +156,6 @@ async function generateFileSignature(file) {
       const hashBuf = await crypto.subtle.digest("SHA-256", combined);
       hash = Array.from(new Uint8Array(hashBuf)).slice(0, 8).map(b => b.toString(16).padStart(2, "0")).join("");
     } else {
-      // フォールバック: 先頭・末尾バイトの簡易チェックサム
       const h = new Uint8Array(headSlice);
       const t = new Uint8Array(tailSlice);
       let sum = 0;
@@ -174,7 +169,7 @@ async function generateFileSignature(file) {
   }
 }
 
-// === ZIP処理（既存と同様） ===
+// === ZIP処理 ===
 function u8view(ab) { return new Uint8Array(ab); }
 
 function findEOCD(u8) {
@@ -246,23 +241,17 @@ async function unzipFindFile(file, targetNames) {
   throw new Error("ZIP内に対象ファイルが見つからない（conversations.json など）");
 }
 
-// === ストリーミングJSONパーサ（offset対応版） ===
-// yieldするたびに { obj, endOffset } を返す
-// endOffset = この会話オブジェクトの終端バイト位置（チェックポイント用）
-async function* streamParseTopLevelArrayOfObjects(byteStream, totalBytes, startOffset, onProgress) {
+// === ストリーミングJSONパーサ（シンプル版：件数ベース） ===
+async function* streamParseTopLevelArrayOfObjects(byteStream) {
   const reader = byteStream.getReader();
   const dec = new TextDecoder("utf-8");
   let buf = "";
-  let bytes = startOffset; // 累積バイト数
-  let lastObjEndOffset = startOffset; // 最後に完了したオブジェクトの終端
 
-  // scanning state
   let started = false;
   let inString = false;
   let esc = false;
   let depth = 0;
   let objStart = -1;
-  let objStartBytes = 0; // オブジェクト開始時のバイト位置
 
   function isWS(ch) { return ch === " " || ch === "\n" || ch === "\r" || ch === "\t"; }
 
@@ -270,9 +259,6 @@ async function* streamParseTopLevelArrayOfObjects(byteStream, totalBytes, startO
     const { value, done } = await reader.read();
     if (done) break;
 
-    const chunkSize = value.byteLength;
-    bytes += chunkSize;
-    if (onProgress) onProgress(bytes, totalBytes);
     buf += dec.decode(value, { stream: true });
 
     let i = 0;
@@ -297,7 +283,6 @@ async function* streamParseTopLevelArrayOfObjects(byteStream, totalBytes, startO
         }
         if (ch === "{") {
           objStart = i;
-          objStartBytes = bytes - (buf.length - i); // このオブジェクトの開始バイト位置
           depth = 1;
           inString = false;
           esc = false;
@@ -325,11 +310,7 @@ async function* streamParseTopLevelArrayOfObjects(byteStream, totalBytes, startO
             throw new Error("JSONパースエラー: " + (e?.message || e));
           }
 
-          // このオブジェクトの終端バイト位置
-          const endOffset = bytes - (buf.length - i - 1);
-          lastObjEndOffset = endOffset;
-
-          yield { obj, endOffset };
+          yield obj;
 
           buf = buf.slice(i + 1);
           i = -1;
@@ -461,9 +442,8 @@ function buildAutoHistoryFromStats(earliest, seen) {
 }
 
 // === メイン処理 ===
-const BATCH_SIZE = 25;           // バッチ書き込みサイズ
+const BATCH_SIZE = 25;
 const CHECKPOINT_INTERVAL = 25;  // N件ごとにチェックポイント
-const CHECKPOINT_BYTES = 2 * 1024 * 1024; // または Mバイトごと
 
 async function handleFile(file, options = {}) {
   cancelled = false;
@@ -478,20 +458,17 @@ async function handleFile(file, options = {}) {
   let checkpoint = await getOne(db, STORES.importState, fileSignature);
 
   if (checkpoint && !resumeFromCheckpoint && !skipCheckpointPrompt) {
-    // チェックポイントが見つかった場合、メインスレッドに確認を求める
     postCheckpointFound(checkpoint, fileSignature);
-    return; // メインスレッドからの指示を待つ
+    return;
   }
 
   // 統計
   let stats = {
-    processed: checkpoint?.processedCount || 0,
+    processed: 0,  // 今回読んだ件数（スキップ再開用カウント含む）
     saved: checkpoint?.savedCount || 0,
-    skipped: checkpoint?.skippedCount || 0,
-    bytes: checkpoint?.offsetBytes || 0
+    skipped: checkpoint?.skippedCount || 0
   };
-  let startOffset = checkpoint?.offsetBytes || 0;
-  let lastCheckpointBytes = startOffset;
+  const skipUntil = checkpoint?.processedCount || 0;  // この件数まではスキップ（再開用）
 
   // 自動ヒストリー用
   let earliest = null;
@@ -515,7 +492,7 @@ async function handleFile(file, options = {}) {
 
   // バッチ処理
   let batch = [];
-  let batchIndex = [];  // conv_index用
+  let batchIndex = [];
 
   async function flushBatch() {
     if (!batch.length) return;
@@ -527,17 +504,15 @@ async function handleFile(file, options = {}) {
   }
 
   // チェックポイント保存
-  async function saveCheckpoint(offsetBytes) {
+  async function saveCheckpoint() {
     const cp = {
       id: fileSignature,
-      offsetBytes,
       processedCount: stats.processed,
       savedCount: stats.saved,
       skippedCount: stats.skipped,
       updatedAt: Date.now()
     };
     await putOne(db, STORES.importState, cp);
-    lastCheckpointBytes = offsetBytes;
   }
 
   // 重複チェック（バッチ単位で効率化）
@@ -547,43 +522,29 @@ async function handleFile(file, options = {}) {
     return convs.map(conv => {
       const ex = existing.get(conv.id);
       if (!ex) return { conv, isDuplicate: false };
-      // 既存のupdateTimeと比較: 同じか既存が新しければスキップ
       if (ex.updateTime >= conv.updatedAt) {
         return { conv, isDuplicate: true };
       }
-      return { conv, isDuplicate: false }; // 新しいデータなので更新
+      return { conv, isDuplicate: false };
     });
   }
 
   // ストリーム準備
   let byteStream = null;
-  let totalBytes = file.size || 0;
   let isChatGPT = true;
-  let isZip = name.endsWith(".zip");
 
-  if (isZip) {
-    // ZIP の場合、offset再開は非対応（圧縮済みのため）
-    if (startOffset > 0) {
-      postStatus("ZIP形式は途中再開に非対応です。最初から開始します…");
-      startOffset = 0;
-      stats = { processed: 0, saved: 0, skipped: 0, bytes: 0 };
-    }
+  if (name.endsWith(".zip")) {
     postStatus("ZIP解析中…");
     const found = await unzipFindFile(file, ["conversations.json", "conversations.json.txt"]);
     if (cancelled) return;
     byteStream = found.stream;
-    totalBytes = found.uncompSize || totalBytes;
     isChatGPT = true;
   } else {
-    // JSON直接
     const head = await file.slice(0, Math.min(64 * 1024, file.size)).text();
     const first = head.match(/\S/)?.[0] || "";
     if (first === "[") {
       isChatGPT = /\"mapping\"\s*:|\"current_node\"\s*:/.test(head);
-      // offset再開: ファイルの途中からスライス
-      const slicedFile = startOffset > 0 ? file.slice(startOffset) : file;
-      byteStream = slicedFile.stream();
-      totalBytes = file.size;
+      byteStream = file.stream();
     } else {
       isChatGPT = false;
       byteStream = null;
@@ -593,43 +554,46 @@ async function handleFile(file, options = {}) {
   if (cancelled) return;
 
   if (byteStream && isChatGPT) {
-    postStatus(startOffset > 0 ? `${stats.processed}件目から再開中…` : "JSON分割パース中…");
-
-    const onProgress = (bytes, total) => {
-      stats.bytes = bytes;
-      postProg({
-        bytes,
-        totalBytes: total || totalBytes,
-        processed: stats.processed,
-        saved: stats.saved,
-        skipped: stats.skipped,
-        phase: "parse"
-      });
-    };
+    postStatus(skipUntil > 0 ? `${skipUntil}件目から再開中…` : "JSON分割パース中…");
 
     let pendingConvs = [];
 
-    for await (const { obj: rawConv, endOffset } of streamParseTopLevelArrayOfObjects(byteStream, totalBytes, startOffset, onProgress)) {
+    for await (const rawConv of streamParseTopLevelArrayOfObjects(byteStream)) {
       if (cancelled) {
-        // キャンセル時にチェックポイント保存
         await flushBatch();
-        await saveCheckpoint(endOffset);
+        await saveCheckpoint();
         postStatus(`キャンセル: ${stats.processed}件処理済み（次回続きから再開可能）`);
         postMessage({ type: "cancelled", ...stats });
         return;
       }
 
+      stats.processed++;
+
+      // 再開時: skipUntilまでの会話はスキップ（既にDBに保存済み）
+      if (stats.processed <= skipUntil) {
+        // 進捗表示のみ（スキップ中）
+        if (stats.processed % 100 === 0) {
+          postProg({
+            processed: stats.processed,
+            saved: stats.saved,
+            skipped: stats.skipped,
+            phase: "skip",
+            skipUntil
+          });
+          await new Promise(r => setTimeout(r, 0));
+        }
+        continue;
+      }
+
       const conv = normalizeChatGPTConversation(rawConv);
       if (!conv) continue;
 
-      pendingConvs.push({ conv, endOffset });
-      stats.processed++;
+      pendingConvs.push(conv);
 
       // バッチ単位で重複チェック＆保存
       if (pendingConvs.length >= BATCH_SIZE) {
-        const checked = await checkDuplicates(pendingConvs.map(p => p.conv));
-        for (let i = 0; i < checked.length; i++) {
-          const { conv: c, isDuplicate } = checked[i];
+        const checked = await checkDuplicates(pendingConvs);
+        for (const { conv: c, isDuplicate } of checked) {
           if (isDuplicate) {
             stats.skipped++;
           } else {
@@ -639,7 +603,6 @@ async function handleFile(file, options = {}) {
             stats.saved++;
           }
         }
-        const lastEndOffset = pendingConvs[pendingConvs.length - 1].endOffset;
         pendingConvs = [];
 
         if (batch.length >= BATCH_SIZE) {
@@ -647,10 +610,17 @@ async function handleFile(file, options = {}) {
           await flushBatch();
         }
 
-        // チェックポイント保存（N件ごと or Mバイトごと）
-        if (stats.processed % CHECKPOINT_INTERVAL === 0 ||
-            (lastEndOffset - lastCheckpointBytes) >= CHECKPOINT_BYTES) {
-          await saveCheckpoint(lastEndOffset);
+        // 進捗通知（件数ベース）
+        postProg({
+          processed: stats.processed,
+          saved: stats.saved,
+          skipped: stats.skipped,
+          phase: "import"
+        });
+
+        // チェックポイント保存（N件ごと）
+        if (stats.processed % CHECKPOINT_INTERVAL === 0) {
+          await saveCheckpoint();
         }
       }
 
@@ -660,9 +630,8 @@ async function handleFile(file, options = {}) {
 
     // 残りの処理
     if (pendingConvs.length > 0) {
-      const checked = await checkDuplicates(pendingConvs.map(p => p.conv));
-      for (let i = 0; i < checked.length; i++) {
-        const { conv: c, isDuplicate } = checked[i];
+      const checked = await checkDuplicates(pendingConvs);
+      for (const { conv: c, isDuplicate } of checked) {
         if (isDuplicate) {
           stats.skipped++;
         } else {
@@ -682,11 +651,12 @@ async function handleFile(file, options = {}) {
     const data = JSON.parse(text);
     const sessions = normalizeGenericSessions(data);
 
-    // 重複チェック
     const checked = await checkDuplicates(sessions);
 
     for (const { conv, isDuplicate } of checked) {
       if (cancelled) break;
+      stats.processed++;
+
       if (isDuplicate) {
         stats.skipped++;
       } else {
@@ -695,11 +665,16 @@ async function handleFile(file, options = {}) {
         batchIndex.push({ id: conv.id, updateTime: conv.updatedAt });
         stats.saved++;
       }
-      stats.processed++;
 
       if (batch.length >= BATCH_SIZE) {
         postStatus(`保存中…（${stats.saved}件保存 / ${stats.skipped}件スキップ）`);
         await flushBatch();
+        postProg({
+          processed: stats.processed,
+          saved: stats.saved,
+          skipped: stats.skipped,
+          phase: "import"
+        });
       }
     }
     await flushBatch();
@@ -741,7 +716,6 @@ onmessage = async (e) => {
     }
   }
 
-  // チェックポイントからの再開指示
   if (type === "resume" && file) {
     try {
       await handleFile(file, { resumeFromCheckpoint: true });
@@ -750,7 +724,6 @@ onmessage = async (e) => {
     }
   }
 
-  // 最初からやり直し指示
   if (type === "restart" && file) {
     try {
       const db = await openDB();
