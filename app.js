@@ -1099,12 +1099,17 @@ if (importWorker) importWorker.onmessage = async (e) => {
   if (m.type === "status") setStatus(m.msg);
 
   if (m.type === "progress") {
-    // 新形式: { bytes, totalBytes, processed, saved, skipped, phase }
-    const pct = m.totalBytes ? (m.bytes / m.totalBytes) * 100 : 0;
-    setBar(pct);
-    const bytesStr = `${bytes(m.bytes)}/${bytes(m.totalBytes)}`;
-    const statsStr = `処理:${m.processed} 保存:${m.saved} スキップ:${m.skipped}`;
-    setStatus(`${m.phase}… ${bytesStr} (${statsStr})`);
+    // 件数ベース: { processed, saved, skipped, phase, skipUntil? }
+    if (m.phase === "skip") {
+      // 再開スキップ中
+      const pct = m.skipUntil ? (m.processed / m.skipUntil) * 100 : 0;
+      setBar(pct);
+      setStatus(`再開スキップ中… ${m.processed}/${m.skipUntil}件`);
+    } else {
+      // 通常インポート（件数ベースなので総数不明、バー非表示）
+      setBar(0);
+      setStatus(`処理: ${m.processed}件 / 保存: ${m.saved}件 / スキップ: ${m.skipped}件`);
+    }
   }
 
   // チェックポイントが見つかった - 再開するか確認
