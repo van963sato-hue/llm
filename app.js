@@ -710,7 +710,7 @@ el.innerHTML = `
   <div class="msgbody">${esc(m.text || "")}</div>
 `;
       const avBtn = el.querySelector(".avatarBtn");
-      if (avBtn) avBtn.onclick = (e) => { e.stopPropagation(); openIconModal(i); };
+      if (avBtn) avBtn.onclick = (e) => { e.stopPropagation(); openIconModal(Number(el.dataset.i)); };
 el.onclick = () => {
         const idx = Number(el.dataset.i);
         if (selected.has(idx)) selected.delete(idx); else selected.add(idx);
